@@ -26,4 +26,6 @@ while True:
                     page = browser.new_page()
                     page.goto("https://www.baidu.com")
                     time.sleep(10)
+                remote.os._exit(0)
+                # 注意: 不要调用 remote.sys.exit()，那会退出远程客户端进程
     time.sleep(2)
