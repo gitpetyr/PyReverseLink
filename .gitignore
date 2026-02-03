@@ -208,3 +208,4 @@ __marimo__/
 
 # PyReverseLink - SSL 证书 (敏感!)
 certs/
+*/certs/
